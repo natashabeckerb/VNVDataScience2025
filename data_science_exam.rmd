@@ -1,0 +1,1512 @@
+---
+title: "Data Science Data Analysis"
+author: "Victoria Engberg Lowe, Natasha Becker Bertelsen, Vlada Caraman"
+date: "2025-05-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Installing packages
+```{r}
+pacman::p_load(dplyr,
+               raster,
+               sf,
+               readxl,
+               openxlsx,
+               writexl,
+               mapview,
+               leaflet,
+               tmap,
+               spdep,
+               sfdep,
+               lmerTest,
+               tidyr,
+               ggplot2,
+               ggpubr,
+               gridExtra,
+               RColorBrewer,
+               readr,
+               ggspatial,
+               Kendall,
+               zoo,
+               purrr,
+               sp, 
+               plotly,
+               GWmodel,
+               stringr)
+library(dplyr)
+```
+
+```{r}
+# set working directory
+setwd('.')
+getwd()
+
+?spacetime
+
+# Set a seed
+set.seed(1995)
+```
+
+# Loading in municipality data
+```{r}
+# Load the municipalities data 
+munic <- readRDS("Data/gadm36_DNK_2_sp.RDS")
+munic_df <- st_transform(st_as_sf(munic), crs = 25832)
+munic_df
+# Getting the structure correct
+munic_df <- munic_df %>% 
+  dplyr::select(NAME_2, geometry) %>% 
+  dplyr::rename(Municipality = NAME_2)
+
+row.names(munic_df) <- NULL # make the row numbers start at 1
+
+unique(munic_df$Municipality)
+
+# fixing the municipality names in the municipality dataframe
+munic_df$Municipality[31] <- "Aarhus"
+munic_df$Municipality[21] <- "Høje-Taastrup"
+munic_df$Municipality[60] <- "Vesthimmerlands"
+
+# removing municipalities where data have been excluded (Christiansø)
+munic_df <- munic_df %>% 
+  filter(Municipality != "Christiansø")
+```
+# Loading in region and municipality mapping
+```{r}
+# Load the municipalities data 
+region <- readRDS("Data/gadm36_DNK_2_sp.RDS")
+region_df <- st_transform(st_as_sf(region), crs = 25832)
+region_df
+
+# Getting the structure correct
+region_df <- region_df %>% 
+  dplyr::select(NAME_1, NAME_2) %>% 
+  dplyr::rename(Municipality = NAME_2,
+                Region = NAME_1)
+
+# Remove the geometry column as we don't need it
+region_df <- st_drop_geometry(region_df)
+
+row.names(region_df) <- NULL # make the row numbers start at 1
+
+unique(region_df$Municipality)
+
+# fixing the municipality names in the municipality dataframe
+region_df$Municipality[31] <- "Aarhus"
+region_df$Municipality[21] <- "Høje-Taastrup"
+region_df$Municipality[60] <- "Vesthimmerlands"
+
+# removing municipalities where data have been excluded (Christiansø)
+region_df <- region_df %>% 
+  filter(Municipality != "Christiansø") 
+```
+
+
+
+# Define neighbours for the municipalities
+```{r}
+# get center points of each municipality
+mun_centers <- st_centroid(munic_df$geometry, of_largest_polygon = TRUE)
+
+# make neighbors list from k neighbors
+munic_neighbours <- knn2nb(knearneigh(mun_centers, k = 3))
+
+# convert the k-nearest neighbors list to a weights list
+munic_neightsbour_SW <- nb2listw(munic_neighbours, style = "W")
+```
+
+
+# Population in municipalities data
+```{r}
+# Load data
+munic_population <- read_excel("Data/munic_population.xlsx")
+# Getting the correct column names:
+## Extract the second row of the dataframe
+new_column_names <- munic_population[2, ]
+
+## Convert the extracted row to a character vector
+new_column_names <- as.character(new_column_names)
+
+## Set the column names of the data frame to be the extracted row
+colnames(munic_population) <- new_column_names
+
+## Remove the first and last two rows from the dataframe
+munic_population <- munic_population[-c(1:2), ]
+munic_population <- head(munic_population, n = nrow(munic_population) - 2)
+
+## Changing the name of the first column as it is unnamed right now
+colnames(munic_population)[1] <- "Municipality"
+
+## Remove 2025 as the year is not complete yet
+munic_population <- munic_population %>% 
+  dplyr::select(-"2025")
+
+## Remove "Christiansø"
+munic_population <- munic_population %>% 
+  filter(Municipality != "Christiansø")
+
+## Making the input numeric and not character
+munic_population <- munic_population %>% 
+  mutate(across(starts_with("20"), as.numeric))
+```
+
+# Population per different age groups
+```{r}
+# Load data
+munic_age <- read_excel("Data/munic_ages.xlsx")
+# Getting the correct column names:
+## Extract the second row of the dataframe
+new_column_names <- munic_age[2, ]
+
+## Convert the extracted row to a character vector
+new_column_names <- as.character(new_column_names)
+
+## Set the column names of the data frame to be the extracted row
+colnames(munic_age) <- new_column_names
+
+## Remove the first and last two rows from the dataframe
+munic_age <- munic_age[-c(1:2), ]
+munic_age <- head(munic_age, n = nrow(munic_age) - 2)
+
+## Changing the name of the first column as it is unnamed right now
+colnames(munic_age)[1] <- "Age_group"
+colnames(munic_age)[2] <- "Municipality"
+
+# Fill out age
+munic_age <- munic_age %>% 
+  fill(Age_group, .direction = "down")
+
+# Remove 2025 as the year is not complete yet
+munic_age <- munic_age %>% 
+  dplyr::select(-"2025")
+
+## Remove "Christiansø"
+munic_age <- munic_age %>% 
+  filter(Municipality != "Christiansø")
+
+# Relocate age to be after municipality
+munic_age <- munic_age %>% 
+  relocate(Age_group, .after = Municipality)
+
+# getting the correct age intervals
+munic_age <- munic_age %>% 
+  dplyr::mutate(Age_group = case_when(
+    Age_group == "65-69 år" ~ "65-69",
+    Age_group == "70-74 år" ~ "70-74",
+    Age_group == "75-79 år" ~ "75-79",
+    Age_group == "80-84 år" ~ "80-84", 
+    Age_group %in% c("85-89 år", "90-94 år", "95-99 år", "100-104 år", 
+                     "105-109 år", "110 år +") ~ "85+",
+    TRUE ~ as.character(Age_group)
+  ))
+
+# Summarising the 85+ age groups into just one
+years <- as.character(2010:2024)
+
+munic_age[years] <- lapply(munic_age[years], as.numeric)
+
+munic_age <- munic_age %>% 
+  group_by(Municipality, Age_group) %>% 
+  summarise(across(all_of(years), sum, na.rm = TRUE), .groups = "drop")
+```
+
+
+
+## Age distributions national level 2010-2024
+```{r}
+all_age_distributions_dk <- read_xlsx("Data/nation_ref_all_years.xlsx")
+
+# getting the correct age intervals
+all_age_distributions_dk <- all_age_distributions_dk %>% 
+  dplyr::mutate(Age_group = case_when(
+    Age_group == "65-69 år" ~ "65-69",
+    Age_group == "70-74 år" ~ "70-74",
+    Age_group == "75-79 år" ~ "75-79",
+    Age_group == "80-84 år" ~ "80-84", 
+    Age_group == "85 år og derover" ~ "85+",
+    TRUE ~ as.character(Age_group)
+  ))
+
+# make a list of years as strings to use
+years <- as.character(2010:2024)
+
+# create proportion columns for each year
+all_age_distributions_dk <- all_age_distributions_dk %>%
+  mutate(
+    across(
+      .cols = all_of(years),
+      .fns = ~ .x / get(paste0(cur_column(), "_pop")),
+      .names = "{.col}_prop"
+    )
+  )
+
+# relocate each proportion column so that it is after the _pop column
+for (yr in years) {
+  all_age_distributions_dk <- all_age_distributions_dk %>%
+    relocate(paste0(yr, "_prop"), .after = paste0(yr, "_pop"))
+}
+
+# calculate an average proportion
+standard_population <- all_age_distributions_dk %>%
+  pivot_longer(
+    cols = ends_with("_prop"),
+    names_to = "year",
+    values_to = "age_prop"
+  ) %>%
+  mutate(year = str_extract(year, "^\\d{4}")) %>% # Extract the year as a number 
+  group_by(Age_group) %>%
+  summarise(Standard_prop = mean(age_prop, na.rm = TRUE), .groups = "drop") #Calculate the mean age_prop across years for each Age_group
+
+```
+
+## UPDATED Plot the average age groups
+
+Prepare a df
+```{r}
+# Calculate average munic_populations
+munic_pop_avg <- munic_population %>%
+  pivot_longer(
+    cols = -Municipality, 
+    names_to = "Year", 
+    values_to = "Population"
+  ) %>%
+  group_by(Municipality) %>%
+  mutate(avg_pop = mean(Population, na.rm = TRUE)) %>%
+  ungroup()
+
+munic_pop_avg <- munic_pop_avg %>% 
+  dplyr::select(Municipality, avg_pop) %>%  # keep only relevant columns
+  distinct(Municipality, .keep_all = TRUE) # remove duplicates (since there used to be one row per munic per year)
+
+# Calculate average munic_ages
+munic_age_avg_pop <- munic_age %>%
+  pivot_longer(
+    cols = -c(Municipality, Age_group),
+    names_to = "Year",
+    values_to = "Population"
+  ) %>%
+  group_by(Municipality, Age_group) %>%
+  summarise(age_avg_pop = mean(Population, na.rm = TRUE), .groups = "drop")
+
+# Merge
+age_df <- merge(munic_pop_avg, munic_age_avg_pop, by = "Municipality")
+
+# add the spatial layer
+age_df <- munic_df %>%
+  full_join(age_df, join_by("Municipality" == "Municipality"))
+
+# calculate percentage for each age group
+age_df <- age_df %>%
+  mutate("avg_pop_%" = round((age_avg_pop/avg_pop)*100,0))
+```
+
+
+Plot
+```{r}
+map <- tm_shape(age_df) +
+  tm_facets(by = "Age_group") +
+  tm_fill(col = "avg_pop_%",
+          style = "pretty",
+          palette = "YlGn",
+          title = "Avg. % of the population",
+          title.size = 0.5) +
+  tm_borders(col = "black",
+             lwd = 1) +
+  tm_compass(position = c("RIGHT", "TOP"),
+             type = "rose",
+             size = 1) +
+  tm_layout(main.title = "Age Distribution per Municipality (2010-2024)",
+            main.title.position = "center",
+            main.title.size = 1.2,
+            bg.color = "white",
+            outer.margins = c(0.05, 0.01, 0.01, 0.01),
+            inner.margins = c(0.02, 0.02, 0.02, 0.02),
+            asp = 1.5
+            )
+
+tmap::tmap_mode("plot")
+print(map)
+
+# Add a caption below the plot
+grid::grid.text(
+  "N. Bertelsen, V. Caraman & V. Lowe, 2025",
+  x = 0.5, y = 0.03,  # centered at the bottom
+  gp = grid::gpar(fontsize = 10)
+)
+```
+
+
+
+# Load diseases data
+```{r}
+# Prevalence of dementia
+dementia <- read_excel("Data/dementia.xlsx", skip= 2, col_names = TRUE)
+
+# Prevalence of type 2 diabetes
+diabetes<- read_excel("data/type_2_diabetes.xlsx", skip= 2, col_names = TRUE)
+
+# Prevalence of heart failure
+heart <- read_excel("Data/heart_failure.xlsx", skip= 2, col_names = TRUE)
+```
+
+## Clean diseases data 
+```{r}
+dementia <- dementia %>%
+  dplyr::select(-Køn, -År) %>%             # Remove 'Køn' and 'År'
+  rename(`Group_Age` = Aldersgruppe) %>%   # Rename 'Aldersgruppe' to 'Group Age'
+  rename(`Municipality` = Kommune)         # Rename 'Kommune' to 'Municipality'
+
+diabetes <- diabetes %>%
+  dplyr::select(-Køn, -År) %>%             # Remove 'Køn' and 'År'
+  rename(`Group_Age` = Aldersgruppe) %>%   # Rename 'Aldersgruppe' to 'Group Age'
+  rename(`Municipality` = Kommune)         # Rename 'Kommune' to 'Municipality'
+  
+heart <- heart %>%
+  dplyr::select(-Køn, -År) %>%             # Remove 'Køn' and 'År'
+  rename(`Group_Age` = Aldersgruppe) %>%   # Rename 'Aldersgruppe' to 'Group Age'
+  rename(`Municipality` = Kommune)         # Rename 'Kommune' to 'Municipality'
+```
+
+## Delete missing data in diseases datasets
+```{r}
+year_cols <- as.character(2010:2024)
+
+# Clean up the dementia data
+dementia <- dementia %>%
+  mutate(across(all_of(year_cols), as.character)) %>%
+  mutate(across(all_of(year_cols), ~na_if(., "-"))) %>%
+  mutate(across(all_of(year_cols), ~na_if(., ""))) %>%
+  mutate(across(all_of(year_cols), as.numeric)) 
+
+dementia %>%
+  summarise(across(all_of(year_cols), ~sum(is.na(.))))
+
+dementia <- dementia %>%
+  drop_na(all_of(year_cols))
+
+# creating a dataset with only dementia instances from 2024
+dementia_2024_df <- dementia %>% 
+  dplyr::select(Municipality,Group_Age, "2024")
+
+# Clean up the diabetes data
+diabetes <- diabetes %>%
+  mutate(across(all_of(year_cols), as.character)) %>%
+  mutate(across(all_of(year_cols), ~na_if(., "-"))) %>%
+  mutate(across(all_of(year_cols), ~na_if(., ""))) %>%
+  mutate(across(all_of(year_cols), as.numeric)) 
+
+diabetes %>%
+  summarise(across(all_of(year_cols), ~sum(is.na(.))))
+
+diabetes <- diabetes %>%
+  drop_na(all_of(year_cols))
+
+# creating a dataset with only diabetes instances from 2024
+diabetes_2024_df <- diabetes %>% 
+  dplyr::select(Municipality, Group_Age, "2024")
+
+# Clean up the heart data
+heart <- heart %>%
+  mutate(across(all_of(year_cols), as.character)) %>%
+  mutate(across(all_of(year_cols), ~na_if(., "-"))) %>%
+  mutate(across(all_of(year_cols), ~na_if(., ""))) %>%
+  mutate(across(all_of(year_cols), as.numeric)) 
+
+heart %>%
+  summarise(across(all_of(year_cols), ~sum(is.na(.))))
+
+heart <- heart %>%
+  drop_na(all_of(year_cols))
+
+# creating a dataset with only heart instances from 2024
+heart_2024_df <- heart %>% 
+  dplyr::select(Municipality,Group_Age, "2024")
+
+
+```
+# AGE ADJUSTMENT
+
+## Dementia
+
+Create the relevant dataframe for age adjusted Dementia 
+```{r}
+# Make a df where munic_age, munic_population, dementia and age distribution is combined
+
+## adding more info to the years in the two dataframes prior to merging
+munic_age_2 <- munic_age %>% 
+  rename_with(
+    ~ paste0(.x, "_age_group_pop"), 
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+munic_population_2 <- munic_population %>% 
+  rename_with(
+    ~ paste0(.x, "_total_pop"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+munic_dementia <- dementia %>% 
+  rename_with(
+    ~ paste0(.x, "_dementia"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  ) %>% 
+  dplyr::select(-Region, -Sygdom) %>% 
+  rename("Age_group" = "Group_Age")
+
+## Removing irrelevant rows from standard_population before merging
+standard_population_2 <- standard_population %>% 
+  dplyr::select(Age_group, Standard_prop)
+
+## Combine the four dfs
+full_dementia <- merge(munic_age_2, munic_dementia, by = c("Municipality", "Age_group"))
+full_dementia <- merge(full_dementia, munic_population_2, by = "Municipality")
+full_dementia <- merge(full_dementia, standard_population_2, by = "Age_group")
+
+# Move the columns around
+full_dementia <- full_dementia %>% 
+  relocate("Standard_prop", .after = "Age_group")
+
+## make a list of the years (we have this earlier as well, but just to be clear it is added again)
+years <- as.character(2010:2024)
+
+## relocate the dementia columns 
+for (yr in years) {
+  full_dementia <- full_dementia %>%
+    relocate(paste0(yr, "_dementia"), .before = paste0(yr, "_age_group_pop"))
+}
+
+## relocate the population columns
+for (yr in years) {
+  full_dementia <- full_dementia %>%
+    relocate(paste0(yr, "_total_pop"), .after = paste0(yr, "_age_group_pop"))
+}
+
+# Remove redudant dfs
+rm(munic_age_2, munic_population_2, munic_dementia, standard_population_2)
+```
+
+
+Calculating the age-adjusted dementia prevalence
+Here we use the years list from above
+
+We calculate the direct age adjustment like this:
+Prevalence_10000 = (Dementia_prevalence/Population_per_age_group_2024)*10000
+Prevalence_age_specific = age_prop*Prevalence_10000)
+```{r}
+# Calculating the prevalence per 10000 people and the age specific prevalence
+for (yr in years) {
+  full_dementia <- full_dementia %>%
+    mutate(
+      !!paste0("Prevalence_10000_", yr) := .data[[paste0(yr, "_dementia")]] / .data[[paste0(yr, "_age_group_pop")]] * 10000,
+      !!paste0("Prevalence_age_specific_", yr) := Standard_prop * .data[[paste0("Prevalence_10000_", yr)]]
+    )
+}
+
+
+
+# Sum the "Prevalence_age_specific" from each municipality per year
+full_dementia_standardized <- full_dementia %>%
+  group_by(Municipality) %>%
+  summarise(
+    across(
+      .cols = starts_with("Prevalence_age_specific_"),
+      .fns = ~ sum(.x, na.rm = TRUE),
+      .names = "Standardized_dementia_prev_{sub('Prevalence_age_specific_', '', .col)}"
+    ),
+    .groups = "drop"
+  )
+```
+
+Combining the data frame with the geometry and make it long format
+So it can be plotted and used for hot spot analysis
+```{r}
+# Combination
+full_dementia_standardized <- munic_df %>% 
+  full_join(full_dementia_standardized, join_by("Municipality" == "Municipality"))
+
+# Pivoting the data into long-format
+dementia_long <- full_dementia_standardized %>%
+  pivot_longer(
+    cols = starts_with("Standardized_dementia_prev_"),
+    names_to = "year",
+    names_prefix = "Standardized_dementia_prev_",
+    values_to = "Standardized_dementia_prev"
+  ) %>%
+  mutate(year = as.integer(year))
+```
+
+## Diabetes
+Create the relevant dataframe for age adjusted diabetes (type 2) 
+```{r}
+# Make a df where munic_age, munic_population, diabetes and age distribution is combined
+
+## adding more info to the years in the two dataframes prior to merging
+### age group population
+munic_age_2 <- munic_age %>% 
+  rename_with(
+    ~ paste0(.x, "_age_group_pop"), 
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+### municipality population
+munic_population_2 <- munic_population %>% 
+  rename_with(
+    ~ paste0(.x, "_total_pop"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+### diabetes prevalence
+munic_diabetes <- diabetes %>% 
+  rename_with(
+    ~ paste0(.x, "_diabetes"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  ) %>% 
+  dplyr::select(-Region, -Sygdom) %>% 
+  rename("Age_group" = "Group_Age")
+
+### removing irrelevant rows from standard_population before merging
+standard_population_2 <- standard_population %>% 
+  dplyr::select(Age_group, Standard_prop)
+
+## Combine the four dfs
+full_diabetes <- merge(munic_age_2, munic_diabetes, by = c("Municipality", "Age_group"))
+full_diabetes <- merge(full_diabetes, munic_population_2, by = "Municipality")
+full_diabetes <- merge(full_diabetes, standard_population_2, by = "Age_group")
+
+# Move the columns around
+full_dementia <- full_dementia %>% 
+  relocate("Standard_prop", .after = "Age_group")
+
+## make a list of the years (we have this earlier as well, but just to be clear it is added again)
+years <- as.character(2010:2024)
+
+## relocate the diabetes columns 
+for (yr in years) {
+  full_diabetes <- full_diabetes %>%
+    relocate(paste0(yr, "_diabetes"), .before = paste0(yr, "_age_group_pop"))
+}
+
+## relocate the population columns
+for (yr in years) {
+  full_diabetes <- full_diabetes %>%
+    relocate(paste0(yr, "_total_pop"), .after = paste0(yr, "_age_group_pop"))
+}
+
+# Remove redudant dfs
+rm(munic_age_2, munic_population_2, munic_diabetes, standard_population_2)
+```
+
+
+Calculating the age-adjusted diabetes prevalence
+Here we use the years list from above
+
+We calculate the direct age adjustment like this:
+Prevalence_10000 = (Diabetes_prevalence/Population_per_age_group_2024)*10000
+Prevalence_age_specific = age_prop*Prevalence_10000)
+```{r}
+# Calculating the prevalence per 10000 people and the age specific prevalence
+for (yr in years) {
+  full_diabetes <- full_diabetes %>%
+    mutate(
+      !!paste0("Prevalence_10000_", yr) := .data[[paste0(yr, "_diabetes")]] / .data[[paste0(yr, "_age_group_pop")]] * 10000,
+      !!paste0("Prevalence_age_specific_", yr) := Standard_prop * .data[[paste0("Prevalence_10000_", yr)]]
+    )
+}
+
+# Sum the "Prevalence_age_specific" from each municipality per year
+full_diabetes_standardized <- full_diabetes %>%
+  group_by(Municipality) %>%
+  summarise(
+    across(
+      .cols = starts_with("Prevalence_age_specific_"),
+      .fns = ~ sum(.x, na.rm = TRUE),
+      .names = "Standardized_diabetes_prev_{sub('Prevalence_age_specific_', '', .col)}"
+    ),
+    .groups = "drop"
+  )
+```
+
+Combining the data frame with the geometry and make it long format (so it can be plotted and used for hot spot analysis)
+```{r}
+# Combination
+full_diabetes_standardized <- munic_df %>% 
+  full_join(full_diabetes_standardized, join_by("Municipality" == "Municipality"))
+
+# Pivoting the data into long-format
+diabetes_long <- full_diabetes_standardized %>%
+  pivot_longer(
+    cols = starts_with("Standardized_diabetes_prev_"),
+    names_to = "year",
+    names_prefix = "Standardized_diabetes_prev_",
+    values_to = "Standardized_diabetes_prev"
+  ) %>%
+  mutate(year = as.integer(year))
+```
+
+
+## Heart failure
+Create the relevant dataframe for age adjusted heart failure 
+```{r}
+# Make a df where munic_age, munic_population, heart and age distribution is combined
+
+## adding more info to the years in the two dataframes prior to merging
+### age group population
+munic_age_2 <- munic_age %>% 
+  rename_with(
+    ~ paste0(.x, "_age_group_pop"), 
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+### munic population
+munic_population_2 <- munic_population %>% 
+  rename_with(
+    ~ paste0(.x, "_total_pop"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  )
+
+### heart failure prevalence
+munic_heart <- heart %>% 
+  rename_with(
+    ~ paste0(.x, "_heart"),
+    .cols = matches("^\\d{4}$") # Matches 4-digit numbers (e.i., 2010, 2011 ...)
+  ) %>% 
+  dplyr::select(-Region, -Sygdom) %>% 
+  rename("Age_group" = "Group_Age")
+
+### removing irrelevant rows from standard_population before merging
+standard_population_2 <- standard_population %>% 
+  dplyr::select(Age_group, Standard_prop)
+
+## Combine the four dfs
+full_heart <- merge(munic_age_2, munic_heart, by = c("Municipality", "Age_group"))
+full_heart <- merge(full_heart, munic_population_2, by = "Municipality")
+full_heart <- merge(full_heart, standard_population_2, by = "Age_group")
+
+# Move the columns around
+full_dementia <- full_dementia %>% 
+  relocate("Standard_prop", .after = "Age_group")
+
+## make a list of the years (we have this earlier as well, but just to be clear it is added again)
+years <- as.character(2010:2024)
+
+## relocate the heart columns 
+for (yr in years) {
+  full_heart <- full_heart %>%
+    relocate(paste0(yr, "_heart"), .before = paste0(yr, "_age_group_pop"))
+}
+
+## relocate the population columns
+for (yr in years) {
+  full_heart <- full_heart %>%
+    relocate(paste0(yr, "_total_pop"), .after = paste0(yr, "_age_group_pop"))
+}
+
+# Remove redundant dfs
+rm(munic_age_2, munic_population_2, munic_heart, standard_population_2)
+```
+
+
+Calculating the age-adjusted diabetes prevalence
+Here we use the years list from above
+
+We calculate the direct age adjustment like this:
+Prevalence_10000 = (Diabetes_prevalence/Population_per_age_group_2024)*10000
+Prevalence_age_specific = age_prop*Prevalence_10000)
+```{r}
+# Calculating the prevalence per 10000 people and the age specific prevalence
+for (yr in years) {
+  full_heart <- full_heart %>%
+    mutate(
+      !!paste0("Prevalence_10000_", yr) := .data[[paste0(yr, "_heart")]] / .data[[paste0(yr, "_age_group_pop")]] * 10000,
+      !!paste0("Prevalence_age_specific_", yr) := Standard_prop * .data[[paste0("Prevalence_10000_", yr)]]
+    )
+}
+
+# Sum the "Prevalence_age_specific" from each municipality per year
+full_heart_standardized <- full_heart %>%
+  group_by(Municipality) %>%
+  summarise(
+    across(
+      .cols = starts_with("Prevalence_age_specific_"),
+      .fns = ~ sum(.x, na.rm = TRUE),
+      .names = "Standardized_heart_prev_{sub('Prevalence_age_specific_', '', .col)}"
+    ),
+    .groups = "drop"
+  )
+```
+
+Combining the data frame with the geometry and make it long format (so it can be plotted and used for hot spot analysis)
+```{r}
+# Combination
+full_heart_standardized <- munic_df %>% 
+  full_join(full_heart_standardized, join_by("Municipality" == "Municipality"))
+
+# Pivoting the data into long-format
+heart_long <- full_heart_standardized %>%
+  pivot_longer(
+    cols = starts_with("Standardized_heart_prev_"),
+    names_to = "year",
+    names_prefix = "Standardized_heart_prev_",
+    values_to = "Standardized_heart_prev"
+  ) %>%
+  mutate(year = as.integer(year))
+```
+
+
+
+# GLOBAL SPATIAL AUTOCORRELATION
+Tests for global clustering (whether the entire dataset shows clustering of high or low values).
+
+## Dementia
+```{r}
+dementia_by_year <- split(dementia_long, dementia_long$year)
+
+# Function to run the Global G test
+run_globalG <- function(df) {
+  globalG.test(df$Standardized_dementia_prev, munic_neightsbour_SW)
+}
+
+# Run globalG.test for each year
+globalG_results <- map(dementia_by_year, run_globalG)
+
+tidy_globalG_dementia_results <- map_dfr(names(globalG_results), function(yr) {
+  res <- globalG_results[[yr]]
+  tibble(
+    Year = yr,
+    Global_G = as.numeric(res$estimate[1]),
+    Expectation = as.numeric(res$estimate[2]),
+    Variance = as.numeric(res$estimate[3]),
+    Z_score = as.numeric(res$statistic),
+    p_value = as.numeric(res$p.value),
+    Significant = ifelse(as.numeric(res$p.value) < 0.05, "Yes", "No")
+  )
+})
+
+tidy_globalG_dementia_results
+```
+## Diabetes
+```{r}
+diabetes_by_year <- split(diabetes_long, diabetes_long$year)
+
+# Function to reorder and run the Global G test
+run_globalG <- function(df) {
+  globalG.test(df$Standardized_diabetes_prev, munic_neightsbour_SW)
+}
+
+# Run globalG.test for each year
+globalG_results <- map(diabetes_by_year, run_globalG)
+
+tidy_globalG_diabetes_results <- map_dfr(names(globalG_results), function(yr) {
+  res <- globalG_results[[yr]]
+  tibble(
+    Year = yr,
+    Global_G = as.numeric(res$estimate[1]),
+    Expectation = as.numeric(res$estimate[2]),
+    Variance = as.numeric(res$estimate[3]),
+    Z_score = as.numeric(res$statistic),
+    p_value = as.numeric(res$p.value),
+    Significant = ifelse(as.numeric(res$p.value) < 0.05, "Yes", "No")
+  )
+})
+
+tidy_globalG_diabetes_results
+```
+
+
+## Heart failure
+```{r}
+heart_by_year <- split(heart_long, heart_long$year)
+
+# Function to reorder and run the Global G test
+run_globalG <- function(df) {
+  globalG.test(df$Standardized_heart_prev, munic_neightsbour_SW)
+}
+
+# Run globalG.test for each year
+globalG_results <- map(heart_by_year, run_globalG)
+
+tidy_globalG_heart_results <- map_dfr(names(globalG_results), function(yr) {
+  res <- globalG_results[[yr]]
+  tibble(
+    Year = yr,
+    Global_G = as.numeric(res$estimate[1]),
+    Expectation = as.numeric(res$estimate[2]),
+    Variance = as.numeric(res$estimate[3]),
+    Z_score = as.numeric(res$statistic),
+    p_value = as.numeric(res$p.value),
+    Significant = ifelse(as.numeric(res$p.value) < 0.05, "Yes", "No")
+  )
+})
+
+tidy_globalG_heart_results
+```
+
+# LOCAL SPATIAL AUTOCORRELATION
+Identifies local hotspots/coldspots (specific municipalities with high/low values surrounded by similar values)
+
+## Dementia
+```{r}
+# Define a function for running the analysis
+run_local_gi_perm <- function(df) {
+  
+  # Run local_g_perm
+  res <- local_g_perm(
+    x = df$Standardized_dementia_prev,
+    nb = munic_neighbours,
+    wt = munic_neightsbour_SW$weights,
+    nsim = 999
+  )
+  # Add Municipality names for clarity
+  res$Municipality <- munic_df$Municipality
+  res
+}
+
+# Run the analysis
+local_gi_dementia_results <- map(dementia_by_year, run_local_gi_perm)
+
+# Make it into a tidy dataframe
+tidy_local_gi_dementia_results <- map_dfr(names(local_gi_dementia_results), function(yr) {
+  res <- local_gi_dementia_results[[yr]] %>%
+    mutate(Year = as.integer(yr)) %>%
+    dplyr::select(Year, Municipality, gi, p_value, cluster)
+  res
+})
+
+tidy_local_gi_dementia_results
+```
+
+
+## Diabetes
+```{r}
+# Define a function for running the analysis
+run_local_gi_perm <- function(df) {
+  
+  # Run local_g_perm
+  res <- local_g_perm(
+    x = df$Standardized_diabetes_prev,
+    nb = munic_neighbours,
+    wt = munic_neightsbour_SW$weights,
+    nsim = 999
+  )
+  # Add Municipality names for clarity
+  res$Municipality <- munic_df$Municipality
+  res
+}
+
+# Run the analysis
+local_gi_diabetes_results <- map(diabetes_by_year, run_local_gi_perm)
+
+# Make it into a tidy dataframe
+tidy_local_gi_diabetes_results <- map_dfr(names(local_gi_diabetes_results), function(yr) {
+  res <- local_gi_diabetes_results[[yr]] %>%
+    mutate(Year = as.integer(yr)) %>%
+    dplyr::select(Year, Municipality, gi, p_value, cluster)
+  res
+})
+
+tidy_local_gi_diabetes_results
+```
+
+
+## Heart failure
+```{r}
+# Define a function for running the analysis
+run_local_gi_perm <- function(df) {
+  
+  # Run local_g_perm
+  res <- local_g_perm(
+    x = df$Standardized_heart_prev,
+    nb = munic_neighbours,
+    wt = munic_neightsbour_SW$weights,
+    nsim = 999
+  )
+  # Add Municipality names for clarity
+  res$Municipality <- munic_df$Municipality
+  res
+}
+
+# Run the analysis
+local_gi_heart_results <- map(heart_by_year, run_local_gi_perm)
+
+# Make it into a tidy dataframe
+tidy_local_gi_heart_results <- map_dfr(names(local_gi_heart_results), function(yr) {
+  res <- local_gi_heart_results[[yr]] %>%
+    mutate(Year = as.integer(yr)) %>%
+    dplyr::select(Year, Municipality, gi, p_value, cluster)
+  res
+})
+
+tidy_local_gi_heart_results
+```
+
+
+# SPATIAL LAG
+
+## Dementia 
+```{r}
+dementia_long <- dementia_long %>%
+  group_by(year) %>%
+  group_modify(~ .x %>%
+    mutate(
+      dementia_lag = lag.listw(munic_neightsbour_SW, Standardized_dementia_prev, NAOK = TRUE)
+    )
+  ) %>%
+  ungroup()
+```
+
+## Diabetes
+```{r}
+diabetes_long <- diabetes_long %>%
+  group_by(year) %>%
+  group_modify(~ .x %>%
+    mutate(
+      diabetes_lag = lag.listw(munic_neightsbour_SW, Standardized_diabetes_prev, NAOK = TRUE)
+    )
+  ) %>%
+  ungroup()
+```
+
+## Heart failure
+```{r}
+heart_long <- heart_long %>%
+  group_by(year) %>%
+  group_modify(~ .x %>%
+    mutate(
+      diabetes_lag = lag.listw(munic_neightsbour_SW, Standardized_heart_prev, NAOK = TRUE)
+    )
+  ) %>%
+  ungroup()
+```
+
+# EMERGING HOTSPOT ANALYSIS (EHSA)
+
+## Set up formalities
+These help with the plotting and can be used for all three EHSA's so we have them here at the start
+```{r}
+## Set the levels for the classification (so the legend in the plot will look nice)
+ehsa_levels <- c(
+  "new hotspot",
+  "consecutive hotspot",
+  "intensifying hotspot",
+  "persistent hotspot",
+  "diminishing hotspot",
+  "sporadic hotspot",
+  "oscilating hotspot",
+  "historical hotspot",
+  "new coldspot",
+  "consecutive coldspot",
+  "intensifying coldspot",
+  "persistent coldspot",
+  "diminishing coldspot",
+  "sporadic coldspot",
+  "oscilating coldspot",
+  "historical coldspot",
+  "no pattern detected"
+)
+
+## Define the colour palette
+ehsa_colors <- c(
+  "new hotspot"           = "#660009", 
+  "consecutive hotspot"   = "#c40010",  
+  "intensifying hotspot"  = "#ff4c3b",  
+  "persistent hotspot"    = "#fd8d3c", 
+  "diminishing hotspot"   = "#feb24c",  
+  "sporadic hotspot"      = "#fddc9a",  
+  "oscilating hotspot"    = "#f9d8e6",  
+  "historical hotspot"    = "#f2b8d5",  
+  "new coldspot"          = "#042b61",  
+  "consecutive coldspot"  = "#165ca8",  
+  "intensifying coldspot" = "#4ca3dd",  
+  "persistent coldspot"   = "#6baed6",
+  "diminishing coldspot"  = "#9ecae1",
+  "sporadic coldspot"     = "#c6dbef",
+  "oscilating coldspot"   = "#e4e0f8",  
+  "historical coldspot"   = "#d2c6f5",  
+  "no pattern detected"   = "#f0f0f0"
+)
+
+```
+
+
+## Dementia
+```{r}
+# Remove the geometry column from dementia_long before making the spacetime object
+dementia_long <- dementia_long %>% 
+  dplyr::select(-geometry)
+
+# Make the neighbours and weights ready for EHSA
+## Copy the existing geometry data frame
+munic_df_EHSA <- munic_df
+
+## Add the neighbour(nb) and weight(wt) columns to the new data frame
+munic_df_EHSA$nb <- munic_neighbours
+munic_df_EHSA$wt <- munic_neightsbour_SW$weights
+
+str(munic_df_EHSA$nb[[1]])  # Should be integer vector
+str(munic_df_EHSA$wt[[1]])  # Should be numeric vector
+
+# Make spacetime object using munic_df and dementia_long
+dementia_spacetime_obj <- spacetime(
+  dementia_long,      # attribute data (what we are wanting to see how changes)
+  munic_df_EHSA,      # geometry sf object (where the locations are)
+  .loc_col = "Municipality",
+  .time_col = "year"
+)
+
+# Put the nb and wt into the space object (because for some reason they don't follow along when the object is made :( )
+dementia_spacetime_obj <- set_col(dementia_spacetime_obj, .from_geo = "nb")
+dementia_spacetime_obj <- set_col(dementia_spacetime_obj, .from_geo = "wt")
+
+# Check that nb and wt made it into the object
+names(dementia_spacetime_obj)
+
+# Run the EHSA
+ehsa_dementia_result <- emerging_hotspot_analysis(
+  dementia_spacetime_obj,
+  .var = "Standardized_dementia_prev",
+  include_gi = TRUE,
+  nb_col = "nb",    # Our neighbor column
+  wt_col = "wt"     # Our weights column
+)
+
+# Inspect the results
+ehsa_dementia_result <- as.data.frame(ehsa_dementia_result)
+head(ehsa_dementia_result)
+
+# Join with munic_df to plot
+ehsa_dementia_result <- ehsa_dementia_result %>% 
+  rename("Municipality" = "location")
+
+ehsa_dementia_result <- merge(munic_df, ehsa_dementia_result, by = "Municipality")
+
+
+# Plot the results
+
+## Apply the levels to the data (see "set up formalities")
+ehsa_dementia_result$classification <- factor(
+  ehsa_dementia_result$classification,
+  levels = ehsa_levels
+)
+
+## Plot
+ehsa_dementia_result %>%  
+  ggplot(aes(fill = classification)) +
+    geom_sf(color = "black", lwd = 0.1) +
+    scale_fill_manual(values = ehsa_colors, na.value = "grey80") +
+    theme_void() +
+    labs(
+      fill = "EHSA Category",
+      title = "Emerging Hot Spot Analysis of Dementia Prevalence (2010-2024)",
+      caption = "N. Bertelsen, V. Caraman & V. Lowe, 2025"
+    ) +
+    theme(plot.caption = element_text(hjust = 0.5)) +
+    annotation_north_arrow(
+      location = "tl",
+      which_north = "true",
+      pad_x = unit(0.2, "in"),
+      pad_y = unit(0.2, "in"),
+      style = north_arrow_fancy_orienteering,
+      height = unit(0.9, "cm"),
+      width = unit(0.9, "cm")
+    )
+
+## Join with regions for an overview
+ehsa_dementia_result <- merge(region_df, ehsa_dementia_result, by = "Municipality")
+
+## Results in a table
+summary_dementia <- ehsa_dementia_result %>%
+  group_by(Region, classification) %>%         
+  summarise(n = n(), .groups = "drop") %>%     
+  pivot_wider(names_from = classification,     
+              values_from = n,
+              values_fill = 0)                 
+
+summary_dementia
+
+ehsa_dementia_result %>%
+  count(classification)%>%
+  mutate(percentage = n / sum(n) * 100)
+```
+
+
+## Diabetes
+```{r}
+# Remove the geometry column from diabetes_long before making the spacetime object
+diabetes_long <- diabetes_long %>% 
+  dplyr::select(-geometry)
+
+# Make the neighbours and weights ready for EHSA
+## Copy the existing geometry data frame
+munic_df_EHSA <- munic_df
+
+## Add the neighbour(nb) and weight(wt) columns to the new data frame
+munic_df_EHSA$nb <- munic_neighbours
+munic_df_EHSA$wt <- munic_neightsbour_SW$weights
+
+str(munic_df_EHSA$nb[[1]])  # Should be integer vector
+str(munic_df_EHSA$wt[[1]])  # Should be numeric vector
+
+# Make spacetime object using munic_df and diabetes_long
+diabetes_spacetime_obj <- spacetime(
+  diabetes_long,      # attribute data (what we are wanting to see how changes)
+  munic_df_EHSA,      # geometry sf object (where the locations are)
+  .loc_col = "Municipality",
+  .time_col = "year"
+)
+
+# Put the nb and wt into the space object (because for some reason they don't follow along when the object is made :( )
+diabetes_spacetime_obj <- set_col(diabetes_spacetime_obj, .from_geo = "nb")
+diabetes_spacetime_obj <- set_col(diabetes_spacetime_obj, .from_geo = "wt")
+
+# Check that nb and wt made it into the object
+names(diabetes_spacetime_obj)
+
+# Run the EHSA
+ehsa_diabetes_result <- emerging_hotspot_analysis(
+  diabetes_spacetime_obj,
+  .var = "Standardized_diabetes_prev",
+  include_gi = TRUE,
+  nb_col = "nb",    # Our neighbor column
+  wt_col = "wt"     # Our weights column
+)
+
+# Inspect the results
+ehsa_diabetes_result <- as.data.frame(ehsa_diabetes_result)
+head(ehsa_diabetes_result)
+
+# Join with munic_df to plot
+ehsa_diabetes_result <- ehsa_diabetes_result %>% 
+  rename("Municipality" = "location")
+
+ehsa_diabetes_result <- merge(munic_df, ehsa_diabetes_result, by = "Municipality")
+
+
+# Plot the results
+
+## Apply the levels to the data (see "set up formalities")
+ehsa_diabetes_result$classification <- factor(
+  ehsa_diabetes_result$classification,
+  levels = ehsa_levels
+)
+
+## Plot
+ehsa_diabetes_result %>%  
+  ggplot(aes(fill = classification)) +
+    geom_sf(color = "black", lwd = 0.1) +
+    scale_fill_manual(values = ehsa_colors, na.value = "grey80") +
+    theme_void() +
+    labs(
+      fill = "EHSA Category",
+      title = "Emerging Hot Spot Analysis of Type 2-Diabetes Prevalence (2010-2024)",
+      caption = "N. Bertelsen, V. Caraman & V. Lowe, 2025"
+    ) +
+    theme(plot.caption = element_text(hjust = 0.5)) +
+    annotation_north_arrow(
+      location = "tl",
+      which_north = "true",
+      pad_x = unit(0.2, "in"),
+      pad_y = unit(0.2, "in"),
+      style = north_arrow_fancy_orienteering,
+      height = unit(0.9, "cm"),
+      width = unit(0.9, "cm")
+    )
+
+## Join with regions for an overview
+ehsa_diabetes_result <- merge(region_df, ehsa_diabetes_result, by = "Municipality")
+
+## Results in a table
+summary_diabetes <- ehsa_diabetes_result %>%
+  group_by(Region, classification) %>%         
+  summarise(n = n(), .groups = "drop") %>%     
+  pivot_wider(names_from = classification,     
+              values_from = n,
+              values_fill = 0)                 
+
+summary_diabetes
+
+ehsa_diabetes_result %>%
+  count(classification)%>%
+  mutate(percentage = n / sum(n) * 100)
+```
+
+
+## Heart failure
+```{r}
+# Remove the geometry column from heart_long before making the spacetime object
+heart_long <- heart_long %>% 
+  dplyr::select(-geometry)
+
+# Make the neighbours and weights ready for EHSA
+## Copy the existing geometry data frame
+munic_df_EHSA <- munic_df
+
+## Add the neighbour(nb) and weight(wt) columns to the new data frame
+munic_df_EHSA$nb <- munic_neighbours
+munic_df_EHSA$wt <- munic_neightsbour_SW$weights
+
+str(munic_df_EHSA$nb[[1]])  # Should be integer vector
+str(munic_df_EHSA$wt[[1]])  # Should be numeric vector
+
+# Make spacetime object using munic_df and heart_long
+heart_spacetime_obj <- spacetime(
+  heart_long,      # attribute data (what we are wanting to see how changes)
+  munic_df_EHSA,      # geometry sf object (where the locations are)
+  .loc_col = "Municipality",
+  .time_col = "year"
+)
+
+# Put the nb and wt into the space object (because for some reason they don't follow along when the object is made :( )
+heart_spacetime_obj <- set_col(heart_spacetime_obj, .from_geo = "nb")
+heart_spacetime_obj <- set_col(heart_spacetime_obj, .from_geo = "wt")
+
+# Check that nb and wt made it into the object
+names(heart_spacetime_obj)
+
+# Run the EHSA
+ehsa_heart_result <- emerging_hotspot_analysis(
+  heart_spacetime_obj,
+  .var = "Standardized_heart_prev",
+  include_gi = TRUE,
+  nb_col = "nb",    # Our neighbor column
+  wt_col = "wt"     # Our weights column
+)
+
+# Inspect the results
+ehsa_heart_result <- as.data.frame(ehsa_heart_result)
+head(ehsa_heart_result)
+
+# Join with munic_df to plot
+ehsa_heart_result <- ehsa_heart_result %>% 
+  rename("Municipality" = "location")
+
+ehsa_heart_result <- merge(munic_df, ehsa_heart_result, by = "Municipality")
+
+
+# Plot the results
+
+## Apply the levels to the data (see "set up formalities")
+ehsa_heart_result$classification <- factor(
+  ehsa_heart_result$classification,
+  levels = ehsa_levels
+)
+
+## Plot
+ehsa_heart_result %>%  
+  ggplot(aes(fill = classification)) +
+    geom_sf(color = "black", lwd = 0.1) +
+    scale_fill_manual(values = ehsa_colors, na.value = "grey80") +
+    theme_void() +
+    labs(
+      fill = "EHSA Category",
+      title = "Emerging Hot Spot Analysis of Heart Failure Prevalence (2010-2024)",
+      caption = "N. Bertelsen, V. Caraman & V. Lowe, 2025"
+    ) +
+    theme(plot.caption = element_text(hjust = 0.5)) +
+    annotation_north_arrow(
+      location = "tl",
+      which_north = "true",
+      pad_x = unit(0.2, "in"),
+      pad_y = unit(0.2, "in"),
+      style = north_arrow_fancy_orienteering,
+      height = unit(0.9, "cm"),
+      width = unit(0.9, "cm")
+    )
+
+## Join with regions for an overview
+ehsa_heart_result <- merge(region_df, ehsa_heart_result, by = "Municipality")
+
+## Results in a table
+summary_heart <- ehsa_heart_result %>%
+  group_by(Region, classification) %>%         
+  summarise(n = n(), .groups = "drop") %>%     
+  pivot_wider(names_from = classification,     
+              values_from = n,
+              values_fill = 0)                 
+
+summary_heart
+
+ehsa_heart_result %>%
+  count(classification)%>%
+  mutate(percentage = n / sum(n) * 100)
+```
+
+
+# GEOGRAPHICALLY AND TEMPORALLY WEIGHTED REGRESSION
+
+## Prepare the data
+```{r}
+## Select relevant columns
+dementia_long_reg <- dementia_long %>% 
+  dplyr::select(Municipality, year, Standardized_dementia_prev)
+
+diabetes_long_reg <- diabetes_long %>% 
+  dplyr::select(Municipality, year, Standardized_diabetes_prev)
+
+heart_long_reg <- heart_long %>% 
+  dplyr::select(Municipality, year, Standardized_heart_prev)
+
+## Merge datasets 
+gtwr_long <- dementia_long_reg %>% 
+  left_join(diabetes_long_reg, by = c("Municipality", "year")) %>% 
+  left_join(heart_long_reg, by = c("Municipality", "year"))
+
+colnames(gtwr_long) <- c("municipality", "year", "dementia_prev", "diabetes_prev", "heart_failure_prev")
+
+## Extract longitude/latitude columns
+munic_df_gtwr <- munic_df
+munic_df_gtwr$longitude <- st_coordinates(st_centroid(munic_df_gtwr$geometry))[,1]
+munic_df_gtwr$latitude  <- st_coordinates(st_centroid(munic_df_gtwr$geometry))[,2]
+munic_df_gtwr <- munic_df_gtwr %>% rename(municipality = Municipality)
+
+# Remove geometry before merging
+munic_df_gtwr <- munic_df_gtwr %>%
+  st_drop_geometry() %>%
+  dplyr::select(municipality, longitude, latitude)
+
+# Merge the coordinates into the long-format data
+gtwr_long <- merge(gtwr_long, munic_df_gtwr, by = "municipality")
+
+# Convert dataset to SpatialPointsDataFrame
+coordinates(gtwr_long) <- ~longitude + latitude
+proj4string(gtwr_long) <- CRS("+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs")
+```
+
+
+## Fit the GTWR model 
+```{r}
+# Specify formula
+gtwr_formula <- dementia_prev ~ diabetes_prev + heart_failure_prev
+
+# Bandwidth selection: Finds the optimal bandwidth (number of data points, i.e. nearest municipality-year combinations in the spatio-temporal space) to fit each local regression. Tests different bandwidths and calculates a cross-validation (CV) score for each. Lower CV scores mean better predictive performance. Saves the optimal bandwidth as bw (here it is 22). 
+bw <- bw.gtwr(
+  formula = gtwr_formula,
+  data = gtwr_long,             # a SpatialPointsDataFrame
+  obs.tv = gtwr_long$year,      # time variable (numeric)
+  approach = "CV",              # or "AICc"
+  kernel = "bisquare",          # Kernel type
+  adaptive = TRUE               # Adaptive bandwidth
+)
+
+# Fit the GTWR model
+# GTWR fits a local regression for each municipality-year combination using only the data points within the bandwidth with weights determined by the kernel function and their spatio-temporal proximity (i.e. how close two observations are to each other in both space and time, the closer two mun-year combinations, the higher the weight on the regression coefficients
+
+gtwr_fit <- gtwr(
+  formula = gtwr_formula,
+  data = gtwr_long,
+  obs.tv = gtwr_long$year,      # time for each observation
+  reg.tv = gtwr_long$year,      # time for each regression location (usually same as obs.tv)
+  st.bw = bw,                   # bandwidth from bw.gtwr()
+  kernel = "bisquare",
+  adaptive = TRUE
+)
+
+# View results of linear regression
+summary(gtwr_fit$lm)
+```
+
+
+
+## Assumptionstesting
+```{r}
+# Extract residuals from the global OLS model
+global_residuals <- residuals(gtwr_fit$lm)
+
+# Histogram of residuals
+hist(global_residuals, main = "Histogram of Global Residuals", xlab = "Residuals")
+
+# Q-Q plot
+qqnorm(global_residuals)
+qqline(global_residuals, col = "red")
+
+# Shapiro-Wilk test 
+shapiro.test(global_residuals)
+```
+
+
+
+## Visualizing the results
+
+crs = 25832
+
+```{r}
+# Convert SpatialPointsDataFrame to sf object
+local_sf <- st_as_sf(local_results)
+
+# Transform to WGS84 (longitude/latitude, EPSG:4326)
+local_sf <- st_transform(local_sf, crs = 4326)
+
+# Extract coordinates from local_sf and add them to a new_df
+coords <- st_coordinates(local_sf)
+local_df <- as.data.frame(local_sf)
+local_df$longitude <- coords[, 1]
+local_df$latitude <- coords[, 2]
+
+# Add the year column
+local_df$year <- gtwr_long$year
+
+# Plot
+ggplot(local_df, aes(x = longitude, y = latitude, color = heart_failure_prev)) +
+  geom_point(size = 2) +
+  scale_color_viridis_c(option = "plasma") +
+  facet_wrap(~ year) +
+  labs(
+    title = "Local Heart Failure Coefficients Influence on Dementia Prevalence",
+    color = "Coefficient",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Calculate mean and SD of the coefficient for each year
+coef_summary <- local_df %>%
+  group_by(year) %>%
+  summarize(
+    mean_coef = mean(heart_failure_prev, na.rm = TRUE),
+    sd_coef = sd(heart_failure_prev, na.rm = TRUE)
+  )
+
+# Plot mean GTWR coefficient
+ggplot(coef_summary, aes(x = year, y = mean_coef)) +
+  geom_line(size = 1.2, color = "#0072B2") +
+  geom_ribbon(aes(ymin = mean_coef - sd_coef, ymax = mean_coef + sd_coef), alpha = 0.2) +
+  labs(
+    title = "Mean GTWR Coefficient for Heart Failure Prevalence by Year",
+    x = "Year",
+    y = "Mean Local GTWR Coefficient"
+  ) +
+  theme_minimal()
+```
+
+
+## Animated plot
+```{r}
+p <- plot_ly(
+  data = local_df,
+  x = ~heart_failure_prev,
+  y = ~y,
+  frame = ~year,
+  type = 'scatter',
+  mode = 'markers',
+  marker = list(color = "darkorange", size = 10, opacity = 0.7),
+  text = ~paste("Year:", year)
+)
+
+p <- layout(
+  p,
+  title = "Dementia vs Heart Failure Prevalence by Year",
+  xaxis = list(title = "Heart Failure Prevalence"),
+  yaxis = list(title = "Dementia Prevalence")
+)
+
+p  
+```
+
+
+
